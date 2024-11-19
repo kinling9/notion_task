@@ -6,7 +6,7 @@ import asyncio
 import logging
 import argparse
 from datetime import datetime, timedelta
-from icalendar import Calendar, Event, vUri
+from icalendar import Calendar, Event, vUri, vText
 from notion_client import AsyncClient
 
 
@@ -114,9 +114,14 @@ class NotionSync:
         for component in cal.walk("VEVENT"):
             due_date = component.get("DTEND").dt
             title = component.get("SUMMARY")
-            if component.get("ATTACH"):
-                url = component.get("ATTACH")
-                page_id = url.split("-")[-1]
+            if component.get("DESCRIPTION"):
+                url = component.get("DESCRIPTION")
+                if type(url) == vText:
+                    page_id = url.split("-")[-1]
+                elif type(url) == list:
+                    page_id = url[1].split("-")[-1]
+                else:
+                    raise ValueError(f"Unknown url type {type(url)}")
                 await self.patch_page(page_id, due_date, title)
             else:
                 # new event need to sync to notion
@@ -125,7 +130,7 @@ class NotionSync:
                 attachment.params["FILENAME"] = "-".join(
                     url.split("/")[-1].split("-")[:-1]
                 )
-                component.add("ATTACH", attachment)
+                component.add("DESCRIPTION", attachment)
                 modified = True
 
         if modified:
