@@ -110,6 +110,11 @@ class NotionSync:
         with open(file_path, "rb") as file:
             cal = Calendar.from_ical(file.read())
 
+        for component in cal.walk("VEVENT"):
+            if component.get("RRULE"):
+                logging.warning("RRULE not supported")
+                return
+
         modified = False
         for component in cal.walk("VEVENT"):
             due_date = component.get("DTEND").dt
@@ -118,6 +123,8 @@ class NotionSync:
                 url = component.get("DESCRIPTION")
                 if type(url) == vText:
                     page_id = url.split("-")[-1]
+                    if "<" in page_id:
+                        page_id = page_id.split("<")[0]
                 elif type(url) == list:
                     page_id = url[1].split("-")[-1]
                 else:
