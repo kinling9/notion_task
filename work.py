@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import datetime
 import time
@@ -22,26 +23,27 @@ NOTION_DATABASE_ID = config.get("NOTION_DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 
 # 邮件配置
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECIPIENT = os.getenv("EMAIL_RECIPIENT")
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+
+EMAIL_SENDER = config.get("EMAIL_SENDER")
+EMAIL_PASSWORD = config.get("EMAIL_PASSWORD")
+EMAIL_RECIPIENT = config.get("EMAIL_RECIPIENT")
+SMTP_SERVER = config.get("SMTP_SERVER", "smtp.qiye.aliyun.com")
+SMTP_PORT = int(config.get("SMTP_PORT", "465"))
 
 # 工作时间配置 (24小时制)
 WORK_START_TIME = datetime.strptime(
     os.getenv("WORK_START_TIME", "09:00"), "%H:%M"
 ).time()
-WORK_END_TIME = datetime.strptime(os.getenv("WORK_END_TIME", "18:00"), "%H:%M").time()
+WORK_END_TIME = datetime.strptime(os.getenv("WORK_END_TIME", "18:30"), "%H:%M").time()
 WORK_DAYS = [
     int(day) for day in os.getenv("WORK_DAYS", "0,1,2,3,4").split(",")
 ]  # 0是周一，6是周日
 
 # 任务状态
-STATUS_TODO = "待办"
-STATUS_IN_PROGRESS = "进行中"
-STATUS_BLOCKED = "阻塞"
-STATUS_COMPLETED = "已完成"
+STATUS_TODO = "TODO"
+STATUS_IN_PROGRESS = "IN PROGRESS"
+STATUS_BLOCKED = "BLOCKER"
+STATUS_COMPLETED = "FINISHED"
 
 
 class TaskManager:
@@ -57,9 +59,12 @@ class TaskManager:
                 database_id=NOTION_DATABASE_ID,
                 filter={
                     "or": [
-                        {"property": "状态", "select": {"equals": STATUS_TODO}},
-                        {"property": "状态", "select": {"equals": STATUS_IN_PROGRESS}},
-                        {"property": "状态", "select": {"equals": STATUS_BLOCKED}},
+                        {"property": "Status", "select": {"equals": STATUS_TODO}},
+                        {
+                            "property": "Status",
+                            "select": {"equals": STATUS_IN_PROGRESS},
+                        },
+                        {"property": "Status", "select": {"equals": STATUS_BLOCKED}},
                     ]
                 },
             )
@@ -80,7 +85,7 @@ class TaskManager:
 
             return self.tasks
         except Exception as e:
-            print(f"从Notion获取任务时出错: {e}")
+            print(f"ERROR in getting task from notion database: {e}")
             return []
 
     def fetch_blocking_events(self):
@@ -566,7 +571,7 @@ def main():
     task_manager = TaskManager()
 
     # 每天早上发送今日计划
-    schedule.every().day.at("07:30").do(task_manager.daily_email_reminder)
+    schedule.every().day.at("09:00").do(task_manager.daily_email_reminder)
 
     # 每小时处理阻塞事件
     schedule.every(1).hours.do(task_manager.handle_blocking_events)
