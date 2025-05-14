@@ -6,6 +6,8 @@ import schedule
 import smtplib
 import json
 import traceback
+import pdb
+import bisect
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from notion_client import Client
@@ -13,6 +15,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from prettytable import PrettyTable
+from datetime import datetime, timedelta, timezone
 
 # Load environment variables
 load_dotenv()
@@ -53,6 +56,7 @@ class TaskManager:
         """Initialize task manager"""
         self.tasks = []
         self.blocking_events = []
+        self.scheduled_tasks = []  # List of tuples (start_time, end_time)
 
     def fetch_tasks_from_notion(self):
         """Fetch all tasks from Notion database"""
@@ -147,7 +151,7 @@ class TaskManager:
 
             # Get deadline
             deadline = None
-            deadline_obj = properties.get("Due data", {}).get("date", {})
+            deadline_obj = properties.get("Deadline", {}).get("date", {})
             if deadline_obj and deadline_obj.get("start"):
                 deadline = datetime.fromisoformat(
                     deadline_obj.get("start").replace("Z", "+00:00")
@@ -157,7 +161,7 @@ class TaskManager:
             duration_obj = properties.get("Effort level", {}).get("select", {})
             duration_map = {"Large": 2, "Medium": 1, "Small": 0.5}
             duration = duration_map.get(
-                duration_obj.get("name") if duration_obj else "Low", 1
+                duration_obj.get("name") if duration_obj else "Small", 0.5
             )
 
             # Get task type
@@ -217,14 +221,19 @@ class TaskManager:
         current_time = dt.time()
         return WORK_START_TIME <= current_time <= WORK_END_TIME
 
-    def is_blocked_time(self, dt):
-        """Check if given time is occupied by a blocking event"""
-        for event in self.blocking_events:
-            start = event.get("start_time")
-            end = event.get("end_time")
-            if start and end and start <= dt <= end:
-                return True
-        return False
+    def get_next_incr_time_if_overlap(self, start, end):
+        """Check for overlap and return the next available time if there's a conflict."""
+        starts = [task_start for task_start, _ in self.scheduled_tasks]
+        idx = bisect.bisect_right(starts, end) - 1
+
+        if idx >= 0:
+            task_start, task_end = self.scheduled_tasks[idx]
+            if task_start < end and start < task_end:
+                # There's an overlap; return the end time of the conflicting task
+                return task_end
+
+        # No overlap found; return the original start time
+        return start
 
     def find_next_available_slot(self, task, start_from=None):
         """Find the next available time slot for a task"""
@@ -251,17 +260,8 @@ class TaskManager:
                 current_time = self._next_work_day_start(current_time)
                 continue
 
-            # Check if blocked
-            if self.is_blocked_time(current_time):
-                # Find the end time of the blocking event
-                next_time = self._next_available_after_blocking(current_time)
-                current_time = next_time
-                continue
-
-            # Check end time
-            end_time = current_time + duration_delta
-
             # For work tasks, ensure the entire task fits within work hours
+            end_time = current_time + duration_delta
             if task_is_work:
                 work_end = datetime.combine(current_time.date(), WORK_END_TIME)
 
@@ -271,17 +271,10 @@ class TaskManager:
                     current_time = self._next_work_day_start(current_time)
                     continue
 
-            # Check if there are any blocking events before the end time
-            blocked = False
-            check_time = current_time
-            while check_time <= end_time:
-                if self.is_blocked_time(check_time):
-                    blocked = True
-                    break
-                check_time += timedelta(minutes=15)  # Check every 15 minutes
-
-            if blocked:
-                current_time = self._next_available_after_blocking(check_time)
+            new_start = self.get_next_incr_time_if_overlap(current_time, end_time)
+            # If the time slot is already scheduled, move to next available times
+            if new_start != current_time:
+                current_time = new_start
                 continue
 
             # Found an available slot
@@ -305,31 +298,28 @@ class TaskManager:
         # If no workday found in 7 days, return original time plus 7 days
         return dt + timedelta(days=7)
 
-    def _next_available_after_blocking(self, dt):
-        """Get the next available time after a blocking event ends"""
-        for event in self.blocking_events:
-            start = event.get("start_time")
-            end = event.get("end_time")
-            if start and end and start <= dt <= end:
-                return end
-
-        # If no specific blocking event found, move forward 30 minutes
-        return dt + timedelta(minutes=30)
-
     def schedule_tasks(self):
         """Schedule time for all tasks"""
         # First get all unfinished tasks and blocking events
         self.fetch_tasks_from_notion()
-        self.fetch_blocking_events()
 
-        # Keep track of already scheduled time slots to avoid overlaps
-        scheduled_times = []
+        # clean local scheduled tasks
+        self.scheduled_tasks.clear()
 
         # Schedule each task
         for task in self.tasks:
             # Skip if task already has start and end times
-            if task.get("start_time") and task.get("end_time"):
-                scheduled_times.append((task.get("start_time"), task.get("end_time")))
+            # breakpoint()
+            if (
+                task.get("status", STATUS_TODO) != STATUS_TODO
+                and task.get("start_time")
+                and task.get("end_time")
+            ):
+                bisect.insort_left(
+                    self.scheduled_tasks,
+                    (task.get("start_time"), task.get("end_time")),
+                    key=lambda x: x[0],
+                )
                 continue
 
             # Find available time slot
@@ -337,12 +327,20 @@ class TaskManager:
 
             if start_time and end_time:
                 # Update task schedule
+                # After updating a task schedule
+                bisect.insort_left(
+                    self.scheduled_tasks, (start_time, end_time), key=lambda x: x[0]
+                )
                 self.update_task_schedule(task.get("id"), start_time, end_time)
-                scheduled_times.append((start_time, end_time))
 
     def update_task_schedule(self, task_id, start_time, end_time):
         """Update the scheduled time for a task in Notion"""
         try:
+            # Ensure timezone-awareness; default to UTC+8 if missing
+            if start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=timezone(timedelta(hours=8)))
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone(timedelta(hours=8)))
             # Convert to ISO format strings
             start_iso = start_time.isoformat()
             end_iso = end_time.isoformat()
@@ -369,38 +367,6 @@ class TaskManager:
         except Exception as e:
             print(f"Error updating task status: {e}")
             return False
-
-    def handle_blocking_events(self):
-        """Handle blocking events and reschedule affected tasks"""
-        # Get all blocking events
-        self.fetch_blocking_events()
-
-        if not self.blocking_events:
-            return
-
-        # Mark affected tasks as blocked
-        for task in self.tasks:
-            start = task.get("start_time")
-            end = task.get("end_time")
-
-            if not start or not end:
-                continue
-
-            # Check overlap with any blocking event
-            for event in self.blocking_events:
-                event_start = event.get("start_time")
-                event_end = event.get("end_time")
-
-                if not event_start or not event_end:
-                    continue
-
-                # Check overlap
-                if start <= event_end and end >= event_start:
-                    # Task overlaps with blocking event, mark as blocked
-                    self.update_task_status(task.get("id"), STATUS_BLOCKED)
-
-        # Reschedule all blocked tasks
-        self.schedule_tasks()
 
     def generate_daily_plan(self):
         """Generate today's work plan"""
@@ -543,9 +509,6 @@ class TaskManager:
         current_tasks = {
             task.get("id"): task for task in self.fetch_tasks_from_notion()
         }
-        current_blocking = {
-            event.get("id"): event for event in self.fetch_blocking_events()
-        }
 
         # Periodically check for changes
         while True:
@@ -555,29 +518,21 @@ class TaskManager:
             new_tasks = {
                 task.get("id"): task for task in self.fetch_tasks_from_notion()
             }
-            new_blocking = {
-                event.get("id"): event for event in self.fetch_blocking_events()
-            }
 
             # Check for new tasks
-            for task_id, task in new_tasks.items():
-                if task_id not in current_tasks:
-                    print(f"Detected new task: {task.get('name')}")
-                    # Schedule the new task
-                    start_time, end_time = self.find_next_available_slot(task)
-                    if start_time and end_time:
-                        self.update_task_schedule(task_id, start_time, end_time)
-
-            # Check for new blocking events
-            if len(new_blocking) != len(current_blocking):
-                print(
-                    "Detected changes in blocking events, reprocessing affected tasks"
-                )
-                self.handle_blocking_events()
+            new_task_ids = set(new_tasks.keys()) - set(current_tasks.keys())
+            update = False
+            for task_id in new_task_ids:
+                task = new_tasks[task_id]
+                if task.get("status") == STATUS_TODO:
+                    print("Detected new task:", task.get("name"))
+                    update = True
+            if update:
+                print("New tasks detected, scheduling...")
+                self.schedule_tasks()
 
             # Update current state
             current_tasks = new_tasks
-            current_blocking = new_blocking
 
 
 def setup_notion_database():
@@ -618,9 +573,6 @@ def main():
 
     # Daily morning email reminder
     schedule.every().day.at("09:00").do(task_manager.daily_email_reminder)
-
-    # Hourly blocking event handling
-    schedule.every(1).hours.do(task_manager.handle_blocking_events)
 
     # Daily afternoon task scheduling
     schedule.every().day.at("17:00").do(task_manager.schedule_tasks)
