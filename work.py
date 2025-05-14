@@ -5,11 +5,14 @@ import time
 import schedule
 import smtplib
 import json
+import traceback
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from notion_client import Client
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from prettytable import PrettyTable
 
 # Load environment variables
 load_dotenv()
@@ -132,7 +135,7 @@ class TaskManager:
             )
 
             # Get status
-            status_obj = properties.get("Status", {}).get("select", {})
+            status_obj = properties.get("Status", {}).get("status", {})
             status = status_obj.get("name") if status_obj else STATUS_TODO
 
             # Get priority
@@ -198,6 +201,7 @@ class TaskManager:
             }
         except Exception as e:
             print(f"Error parsing task: {e}")
+            # print(traceback.format_exc())
             return None
 
     def is_work_time(self, dt=None):
@@ -228,7 +232,7 @@ class TaskManager:
             start_from = datetime.now()
 
         # Work tasks can only be scheduled during work hours
-        task_is_work = task.get("type") == "工作"
+        task_is_work = "work" in task.get("type")
 
         # Estimated task duration
         duration = task.get("duration", 1.0)  # hours
@@ -346,7 +350,9 @@ class TaskManager:
             # Update Notion page
             notion.pages.update(
                 page_id=task_id,
-                properties={"计划时间": {"date": {"start": start_iso, "end": end_iso}}},
+                properties={
+                    "Plan time": {"date": {"start": start_iso, "end": end_iso}}
+                },
             )
             print(f"Updated schedule for task {task_id}: {start_time} - {end_time}")
             return True
@@ -357,9 +363,7 @@ class TaskManager:
     def update_task_status(self, task_id, status):
         """Update task status"""
         try:
-            notion.pages.update(
-                page_id=task_id, properties={"状态": {"select": {"name": status}}}
-            )
+            notion.pages.update(page_id=task_id, properties={"Status": {status}})
             print(f"Updated task {task_id} status to: {status}")
             return True
         except Exception as e:
@@ -413,11 +417,13 @@ class TaskManager:
             if start and start.date() == today:
                 today_tasks.append(task)
 
-        # Sort by start time
-        today_tasks.sort(key=lambda x: x.get("start_time"))
+        # Add timestamp for test identification
+        test_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Generate email content
-        subject = f"Today's Work Plan ({today.strftime('%Y-%m-%d')})"
+        # Update subject to include timestamp
+        subject = (
+            f"Today's Work Plan ({today.strftime('%Y-%m-%d')}) - Test: {test_timestamp}"
+        )
 
         if not today_tasks:
             body = "No tasks scheduled for today."
@@ -488,7 +494,7 @@ class TaskManager:
             with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
                 # server.starttls()
                 server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-                server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, message.as_string())
+                # server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, message.as_string())
 
             print(f"Email sent: {subject}")
             return True
@@ -497,8 +503,38 @@ class TaskManager:
             return False
 
     def daily_email_reminder(self):
-        """Send daily task email reminder"""
+        """Send daily task email reminder and print formatted content to terminal"""
         subject, body = self.generate_daily_plan()
+
+        # Print formatted content to terminal
+
+        soup = BeautifulSoup(body, "html.parser")
+
+        # Extract plan date
+        plan_date = soup.h2.text if soup.h2 else "Today's Work Plan"
+
+        # Print blocking events if present
+        blocking_events = []
+        if soup.h3:
+            print(f"\n{soup.h3.text}")
+            for li in soup.find_all("li"):
+                print(f" - {li.text}")
+
+        # Print tasks table
+        table = soup.find("table")
+        if table:
+            pt = PrettyTable()
+            headers = [header.text for header in table.find_all("th")]
+            pt.field_names = headers
+
+            for row in table.find_all("tr")[1:]:  # Skip header row
+                cols = [col.text for col in row.find_all("td")]
+                pt.add_row(cols)
+
+            print(f"\n{plan_date}")
+            print(pt)
+
+        # Send email
         self.send_email(subject, body)
 
     def monitor_notion_changes(self):
