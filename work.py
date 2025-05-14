@@ -70,7 +70,7 @@ class TaskManager:
 
             self.tasks = []
             for page in response.get("results", []):
-                print(page)
+                # print(page)
                 task = self._parse_notion_page(page)
                 if task:
                     self.tasks.append(task)
@@ -95,11 +95,11 @@ class TaskManager:
                 database_id=NOTION_DATABASE_ID,
                 filter={
                     "and": [
-                        {"property": "类型", "select": {"equals": "阻塞事件"}},
                         {
-                            "property": "状态",
-                            "select": {"not_equals": STATUS_COMPLETED},
+                            "property": "Task type",
+                            "multi_select": {"contains": "Blocker"},
                         },
+                        {"property": "Status", "status": {"equals": STATUS_COMPLETED}},
                     ]
                 },
             )
@@ -126,47 +126,51 @@ class TaskManager:
             # Get basic info
             task_id = page.get("id")
             task_name = (
-                properties.get("名称", {})
+                properties.get("Task name", {})
                 .get("title", [{}])[0]
                 .get("plain_text", "Untitled Task")
             )
 
             # Get status
-            status_obj = properties.get("状态", {}).get("select", {})
+            status_obj = properties.get("Status", {}).get("select", {})
             status = status_obj.get("name") if status_obj else STATUS_TODO
 
             # Get priority
-            priority_obj = properties.get("优先级", {}).get("select", {})
-            priority_map = {"高": 3, "中": 2, "低": 1}
+            priority_obj = properties.get("Priority", {}).get("select", {})
+            priority_map = {"High": 3, "Medium": 2, "Low": 1}
             priority = priority_map.get(
-                priority_obj.get("name") if priority_obj else "低", 1
+                priority_obj.get("name") if priority_obj else "Low", 1
             )
 
             # Get deadline
             deadline = None
-            deadline_obj = properties.get("截止日期", {}).get("date", {})
+            deadline_obj = properties.get("Due data", {}).get("date", {})
             if deadline_obj and deadline_obj.get("start"):
                 deadline = datetime.fromisoformat(
                     deadline_obj.get("start").replace("Z", "+00:00")
                 )
 
             # Get estimated duration (hours)
-            duration = 1.0  # Default 1 hour
-            duration_obj = properties.get("预计时长", {}).get("number")
-            if duration_obj is not None:
-                duration = float(duration_obj)
+            duration_obj = properties.get("Effort level", {}).get("select", {})
+            duration_map = {"Large": 2, "Medium": 1, "Small": 0.5}
+            duration = duration_map.get(
+                duration_obj.get("name") if duration_obj else "Low", 1
+            )
 
             # Get task type
-            task_type_obj = properties.get("类型", {}).get("select", {})
-            task_type = task_type_obj.get("name") if task_type_obj else "工作"
-
+            task_type_obj = properties.get("Task type", {}).get("multi_select", [])
+            task_types = (
+                [item.get("name") for item in task_type_obj]
+                if task_type_obj
+                else ["work"]
+            )
             # Check if task is blocked
             is_blocked = status == STATUS_BLOCKED
 
             # Get planned start and end times
             start_time = None
             end_time = None
-            date_obj = properties.get("计划时间", {}).get("date", {})
+            date_obj = properties.get("Plan time", {}).get("date", {})
             if date_obj:
                 if date_obj.get("start"):
                     start_time = datetime.fromisoformat(
@@ -187,7 +191,7 @@ class TaskManager:
                 "priority": priority,
                 "deadline": deadline,
                 "duration": duration,
-                "type": task_type,
+                "type": task_types,
                 "is_blocked": is_blocked,
                 "start_time": start_time,
                 "end_time": end_time,
@@ -481,8 +485,8 @@ class TaskManager:
             message.attach(html_part)
 
             # Connect to SMTP server and send
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.starttls()
+            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+                # server.starttls()
                 server.login(EMAIL_SENDER, EMAIL_PASSWORD)
                 server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, message.as_string())
 
